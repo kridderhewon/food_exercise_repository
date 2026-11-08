@@ -1,0 +1,202 @@
+{
+  "name": "하루건강 - 식단·운동·체중 관리",
+  "short_name": "하루건강",
+  "description": "개인용 식사, 운동 및 체중 기록 건강관리 앱",
+  "start_url": "./",
+  "scope": "./",
+  "display": "standalone",
+  "orientation": "portrait",
+  "background_color": "#FFFFFF",
+  "theme_color": "#FFFFFF",
+  "icons": [
+    {
+      "src": "./icon.svg",
+      "sizes": "any",
+      "type": "image/svg+xml",
+      "purpose": "any maskable"
+    }
+  ]
+}
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 512 512">
+  <rect width="512" height="512" rx="120" fill="#10B981"/>
+  <text x="50%" y="54%" dominant-baseline="middle" text-anchor="middle"
+        fill="#FFFFFF" font-family="sans-serif" font-weight="900" font-size="280">H</text>
+</svg>
+const CACHE_NAME = "haru-health-shell-v1";
+const APP_SHELL = [
+  "./",
+  "./index.html",
+  "./manifest.webmanifest",
+  "./icon.svg"
+];
+
+self.addEventListener("install", (event) => {
+  event.waitUntil(
+    caches.open(CACHE_NAME)
+      .then((cache) => cache.addAll(APP_SHELL))
+      .then(() => self.skipWaiting())
+  );
+});
+
+self.addEventListener("activate", (event) => {
+  event.waitUntil(
+    caches.keys()
+      .then((keys) =>
+        Promise.all(
+          keys
+            .filter((key) => key !== CACHE_NAME)
+            .map((key) => caches.delete(key))
+        )
+      )
+      .then(() => self.clients.claim())
+  );
+});
+
+self.addEventListener("fetch", (event) => {
+  if (event.request.method !== "GET") return;
+
+  const url = new URL(event.request.url);
+  if (url.origin !== self.location.origin) return;
+
+  event.respondWith(
+    fetch(event.request)
+      .then((response) => {
+        if (response.ok) {
+          const copy = response.clone();
+          caches.open(CACHE_NAME).then((cache) => cache.put(event.request, copy));
+        }
+        return response;
+      })
+      .catch(() =>
+        caches.match(event.request)
+          .then((cached) => cached || caches.match("./index.html"))
+      )
+  );
+});
+from pathlib import Path
+import re
+
+ROOT = Path(__file__).resolve().parents[1]
+DIST = ROOT / "dist"
+html = (ROOT / "index.html").read_text(encoding="utf-8")
+
+# Gemini 미리보기에서 만들어진 임시 Blob manifest 링크를 제거합니다.
+html, count = re.subn(
+    r'<link\s+rel="manifest"\s+href="blob:[^"]*">',
+    "",
+    html,
+    count=1,
+)
+if count != 1:
+    raise SystemExit("index.html의 임시 manifest 링크를 찾지 못했습니다.")
+
+# 임시 Blob manifest를 생성하는 스크립트 부분을 제거합니다.
+start = html.find("    // 1. PWA Manifest")
+end = html.find("    let deferredPwaPrompt", start)
+if start < 0 or end < 0:
+    raise SystemExit("index.html의 임시 PWA 설정 코드를 찾지 못했습니다.")
+html = html[:start] + html[end:]
+
+# HTML 다운로드·외부 호스팅 설치 안내 영역만 제거합니다.
+start_marker = "      <!-- 핵심 해결책: 단일 HTML 파일 다운로드 및 진짜 PWA 설치법 -->"
+end_marker = "      <!-- 외부 호스팅 시 사용할 개인 Gemini API 키 설정 -->"
+start = html.find(start_marker)
+end = html.find(end_marker, start + len(start_marker))
+if start < 0 or end < 0:
+    raise SystemExit("index.html의 설치 안내 영역을 찾지 못했습니다.")
+html = html[:start] + html[end:]
+
+# 설정과 데이터 백업 기능은 유지하고, 첫 화면에 설정 창이 뜨지 않게 합니다.
+html = html.replace("<span>앱 설치 · 설정</span>", "<span>앱 설정</span>", 1)
+html = html.replace(
+    "폰 바탕화면 앱 설치 &amp; 데이터 관리",
+    "앱 설정 · 데이터 관리",
+    1,
+)
+html = html.replace(
+    'id="settingsModal" class="fixed inset-0 z-50 bg-slate-900/40 backdrop-blur-xs items-center justify-center p-4 flex"',
+    'id="settingsModal" class="fixed inset-0 z-50 bg-slate-900/40 backdrop-blur-xs hidden items-center justify-center p-4"',
+    1,
+)
+
+if "</head>" not in html or "</body>" not in html:
+    raise SystemExit("index.html의 HTML 구조를 확인해 주세요.")
+
+# 정식 PWA manifest와 아이콘을 연결합니다.
+if '<link rel="manifest" href="./manifest.webmanifest">' not in html:
+    html = html.replace(
+        "</head>",
+        '  <link rel="manifest" href="./manifest.webmanifest">\n'
+        '  <link rel="icon" href="./icon.svg" type="image/svg+xml">\n</head>',
+        1,
+    )
+
+# 서비스 워커를 등록합니다.
+if "navigator.serviceWorker.register" not in html:
+    html = html.replace(
+        "</body>",
+        """
+  <script>
+    if ("serviceWorker" in navigator) {
+      window.addEventListener("load", () => {
+        navigator.serviceWorker.register("./service-worker.js").catch((error) => {
+          console.error("Service worker registration failed:", error);
+        });
+      });
+    }
+  </script>
+</body>""",
+        1,
+    )
+
+DIST.mkdir(exist_ok=True)
+(DIST / "index.html").write_text(html, encoding="utf-8")
+
+for filename in ("manifest.webmanifest", "service-worker.js", "icon.svg"):
+    (DIST / filename).write_bytes((ROOT / filename).read_bytes())
+
+(DIST / ".nojekyll").touch()
+name: Deploy PWA to GitHub Pages
+
+on:
+  push:
+    branches: [main]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+  pages: write
+  id-token: write
+
+concurrency:
+  group: pages
+  cancel-in-progress: true
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v4
+
+      - name: Configure GitHub Pages
+        uses: actions/configure-pages@v5
+
+      - name: Build PWA site
+        run: python3 scripts/build-pages.py
+
+      - name: Upload Pages artifact
+        uses: actions/upload-pages-artifact@v3
+        with:
+          path: dist
+
+  deploy:
+    environment:
+      name: github-pages
+      url: ${{ steps.deployment.outputs.page_url }}
+    runs-on: ubuntu-latest
+    needs: build
+    steps:
+      - name: Deploy to GitHub Pages
+        id: deployment
+        uses: actions/deploy-pages@v4
